@@ -20,7 +20,8 @@ from typing import Tuple
 # ---------------- Configuration ----------------
 # GDS units
 GDS_UNIT_M       = 1e-6        # 1 µm = 1e-6 m
-GDS_PREC_M       = 1e-9        # precision of 1 nm
+GRID_STEP_UM     = 0.005
+GDS_PREC_M       = GRID_STEP_UM * 1e-6  # precision in meters, aligned to GRID_STEP_UM
 
 # Grid parameters
 MAX_CELLS        = 500_000     # safety cap for Nx*Ny
@@ -31,7 +32,7 @@ GAP_UM           = 2.0         # base edge-to-edge gap [µm]
 MIN_SIDE_UM      = 3.0         # minimum allowed square side [µm]
 MIN_GAP_UM       = 2.0         # minimum safety edge-to-edge gap [µm]
 
-# Sizing targets (optional, inclusive of margins)
+# Sizing targets (inclusive of margins; optional)
 TARGET_WIDTH_UM  = 3000.0
 TARGET_HEIGHT_UM = 2000.0
 MARGIN_UM        = 150.0
@@ -41,7 +42,7 @@ MODE             = "binary"    # "binary" | "grayscale"
 
 # PNG processing
 INVERT           = True        # invert before threshold/intensity use
-THRESHOLD        = 250         # only used in "binary"
+THRESHOLD        = 250         # only used in "binary" (also as cutoff in grayscale)
 
 # Image processing
 RESAMPLE         = "nearest"   # "nearest" | "lanczos" | "bilinear"
@@ -67,6 +68,12 @@ from PIL import Image
 
 LAYER_KW = {"layer": LAYER_NUM, "datatype": DATATYPE_NUM}
 
+# ---------------- Grid helpers ----------------
+def snap(x_um: float) -> float:
+    """Snap a coordinate/length (in µm) to the technology grid."""
+    step = GRID_STEP_UM
+    return round(x_um / step) * step
+
 # ---------------- Image helpers ----------------
 def _load_png_grayscale(path: str) -> Image.Image:
     ext = os.path.splitext(path)[1].lower()
@@ -75,13 +82,12 @@ def _load_png_grayscale(path: str) -> Image.Image:
     return Image.open(path).convert("L")
 
 def _prepare_image(img: Image.Image, mode: str) -> Image.Image:
-    # For grayscale we keep original L; for binary we may invert
     if mode == "binary":
         if INVERT:
             img = Image.eval(img, lambda x: 255 - x)
         return img.point(lambda x: 255 if x >= THRESHOLD else 0, mode="1")
     elif mode == "grayscale":
-        return img  # keep 8-bit L, handle INVERT in loop
+        return img
     else:
         raise ValueError('MODE must be "binary" or "grayscale"')
 
@@ -149,9 +155,7 @@ def _compute_grid_dims_inclusive(
 
 # ---------------- Size constraints helpers ----------------
 def _compute_size_bounds(pitch_um: float) -> Tuple[float, float]:
-    # Ensure min side and min gap are enforced
     side_min = max(0.0, float(MIN_SIDE_UM))
-    # Side must allow at least MIN_GAP_UM to neighbors
     side_max = max(0.0, min(float(CELL_UM), float(pitch_um) - float(MIN_GAP_UM)))
     if side_min > side_max:
         raise ValueError(
@@ -161,7 +165,6 @@ def _compute_size_bounds(pitch_um: float) -> Tuple[float, float]:
     return side_min, side_max
 
 def _intensity_to_side(t01: float, side_min: float, side_max: float) -> float:
-    # Map [0,1] to [side_min, side_max]
     t = 0.0 if t01 < 0.0 else (1.0 if t01 > 1.0 else float(t01))
     return side_min + (side_max - side_min) * t
 
@@ -172,13 +175,11 @@ def png_to_gds(input_path: str, output_path: str, verbose: bool = True):
     margin  = float(MARGIN_UM)
     pitch_um = cell_um + gap_um
 
-    # Enforce global bounds once
     side_min, side_max = _compute_size_bounds(pitch_um)
 
     img_gray = _load_png_grayscale(input_path)
     img_proc = _prepare_image(img_gray, MODE)
 
-    # Grid dims use the base 'cell_um' as minimal tile for packing
     nx, ny = _compute_grid_dims_inclusive(
         img_gray.width, img_gray.height,
         TARGET_WIDTH_UM, TARGET_HEIGHT_UM,
@@ -208,37 +209,31 @@ def png_to_gds(input_path: str, output_path: str, verbose: bool = True):
             x0_col = margin + i * pitch
 
             if MODE == "binary":
-                on = (pixels[i, j_img] == 255)  # 1-bit
+                on = (pixels[i, j_img] == 255)
                 if not on:
                     continue
-                side = cell_um  # keep base side in binary
+                side = cell_um 
             else:  # grayscale
-                # Read 8-bit intensity (0=black, 255=white)
                 val = pixels[i, j_img]
 
-                # Empty condition + renormalization
                 if not INVERT:
-                    # Black-side empty: val <= THRESHOLD -> empty
                     if val <= THRESHOLD:
                         continue
-                    # Map (THRESHOLD..255] -> (0..1]
                     t01 = (float(val) - THRESHOLD) / (255.0 - THRESHOLD)
                 else:
-                    # White-side empty: val >= THRESHOLD -> empty
                     if val >= THRESHOLD:
                         continue
-                    # Map [0..THRESHOLD) -> (1..0], invert to make darker=larger
                     t01 = (THRESHOLD - float(val)) / THRESHOLD
 
                 side = _intensity_to_side(t01, side_min, side_max)
                 if side <= 0.0:
                     continue
 
-            # Top-left anchored squares keep gap >= MIN_GAP_UM
-            x0 = x0_col
-            y0 = y0_row
-            x1 = x0 + side
-            y1 = y0 + side
+            x0 = snap(x0_col)
+            y0 = snap(y0_row)
+            side = snap(side)
+            x1 = snap(x0 + side)
+            y1 = snap(y0 + side)
 
             if GDSPY:
                 rects.append(gds.Rectangle((x0, y0), (x1, y1), **LAYER_KW))
@@ -261,6 +256,7 @@ def png_to_gds(input_path: str, output_path: str, verbose: bool = True):
         print(f"[INFO] Base Side={cell_um} µm, Base Gap={gap_um} µm, Pitch={pitch} µm")
         print(f"[INFO] Safety: MIN_SIDE={side_min} µm, MIN_GAP={MIN_GAP_UM} µm, side_max={side_max} µm")
         print(f"[INFO] Margin per side={margin} µm")
+        print(f"[INFO] GDS precision={GDS_PREC_M*1e9:.0f} nm, snap grid={GRID_STEP_UM} µm")
         print(f"[INFO] Bounding box ~ {width_um:.3f} µm x {height_um:.3f} µm (inclusive of margins)")
         if TARGET_WIDTH_UM is not None or TARGET_HEIGHT_UM is not None:
             print(f"[INFO] Targets (inclusive): W={TARGET_WIDTH_UM} µm, H={TARGET_HEIGHT_UM} µm")

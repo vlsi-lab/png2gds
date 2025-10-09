@@ -42,7 +42,8 @@ Open `output.gds` in KLayout (or any GDS viewer).
 ```python
 # GDS units
 GDS_UNIT_M       = 1e-6        # 1 µm = 1e-6 m
-GDS_PREC_M       = 1e-9        # precision of 1 nm
+GRID_STEP_UM     = 0.005
+GDS_PREC_M       = GRID_STEP_UM * 1e-6  # precision in meters, aligned to GRID_STEP_UM
 
 # Grid parameters
 MAX_CELLS        = 500_000     # safety cap for Nx*Ny
