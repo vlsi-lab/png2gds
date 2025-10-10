@@ -34,45 +34,49 @@ Open `output.gds` in KLayout (or any GDS viewer).
 * Places the grid with **margins**; flips **Y** so image top maps to positive GDS Y.
 * Enforces **minimum square side** and **minimum edge-to-edge gap** globally.
 * Caps total tiles with **MAX_CELLS** (auto downscales with a warning).
+* **Snaps** all coordinates and sizes to a technology **grid step**.
 
 ---
 
-## Configuration (edit constants in `# img2gds.py`)
+## Configuration (edit constants in `img2gds.py`)
 
 ```python
-# GDS units
-GDS_UNIT_M       = 1e-6        # 1 µm = 1e-6 m
-GRID_STEP_UM     = 0.005
-GDS_PREC_M       = GRID_STEP_UM * 1e-6  # precision in meters, aligned to GRID_STEP_UM
+# ========================= USER-TUNABLE =========================
+# Target outer bounding box (inclusive). No geometry is drawn outside.
+TARGET_WIDTH_UM   = 3000.0
+TARGET_HEIGHT_UM  = 2000.0
 
-# Grid parameters
-MAX_CELLS        = 500_000     # safety cap for Nx*Ny
-CELL_UM          = 10.0        # base side for binary [µm]
-GAP_UM           = 2.0         # base edge-to-edge gap [µm]
+# Inner margins that reserve space for pads, keep-out, etc.
+MARGIN_X_UM       = 150.0
+MARGIN_Y_UM       = 150.0
 
-# Sizing constraints (enforced in any mode)
-MIN_SIDE_UM      = 3.0         # minimum allowed square side [µm]
-MIN_GAP_UM       = 2.0         # minimum safety edge-to-edge gap [µm]
+# How to place the content inside the drawable box if it does not fully fill it.
+ALIGN             = "center"       # "center" | "topleft"
 
-# Sizing targets (inclusive of margins; optional)
-TARGET_WIDTH_UM  = 3000.0
-TARGET_HEIGHT_UM = 2000.0
-MARGIN_UM        = 150.0
+# Rendering
+MODE              = "binary"       # "binary" | "grayscale"
+INVERT            = True
+THRESHOLD         = 0
+RESAMPLE          = "nearest"      # "nearest" | "lanczos" | "bilinear"
+FIT_MODE          = "contain"      # "contain" | "fit_width" | "fit_height"
 
-# Rendering mode
-MODE             = "binary"    # "binary" | "grayscale"
+# Grid (logical pixel grid)
+CELL_UM           = 10.0           # base side for binary [µm]
+GAP_UM            = 5.0            # edge-to-edge gap [µm]
+MAX_CELLS         = 500_000        # cap for Nx*Ny
 
-# PNG processing
-INVERT           = True        # invert before threshold/intensity use
-THRESHOLD        = 250         # only used in "binary" (also as cutoff in grayscale)
+# Content layer/datatype (where the squares go)
+LAYER_NUM         = 0
+DATATYPE_NUM      = 0
 
-# Image processing
-RESAMPLE         = "nearest"   # "nearest" | "lanczos" | "bilinear"
-FIT_MODE         = "contain"   # "contain" | "fit_width" | "fit_height"
+# =========================== ADVANCED ===========================
+GDS_UNIT_M        = 1e-6           # 1 user unit = 1 µm
+GRID_STEP_UM      = 0.005          # snapping step [µm]
+GDS_PREC_M        = 1e-9           # file precision in meters
 
-# Numeric GDS layer/datatype
-LAYER_NUM        = 0
-DATATYPE_NUM     = 0
+# Constraints
+MIN_SIDE_UM       = 3.0            # min square side [µm]
+MIN_GAP_UM        = 2.0            # min edge-to-edge gap [µm]
 ```
 
 ---
@@ -81,70 +85,68 @@ DATATYPE_NUM     = 0
 
 ### Binary
 
-* After optional invert, pixels are thresholded at `THRESHOLD`.
-* **White** pixels → one square of side `CELL_UM` (fixed).
-* **Black** pixels → empty.
+* After optional invert, pixels are thresholded at `THRESHOLD` and converted to a 1-bit mask.
+* **White** pixels (`255`) → one square of side `CELL_UM` (fixed).
+* **Black** pixels (`0`) → empty.
 
 ### Grayscale
 
-* After optional invert, pixels are filtered by `THRESHOLD`:
+* Pixels are first filtered by `THRESHOLD` (after optional invert):
 
   * With `INVERT=True`: pixels **below** `THRESHOLD` are active; brighter pixels are empty.
   * With `INVERT=False`: pixels **above** `THRESHOLD` are active; darker pixels are empty.
-* Active pixels map to a side length in **[side_min, side_max]**:
 
-  * `side_min = max(MIN_SIDE_UM, 0)`
-  * `side_max = min(CELL_UM, CELL_UM + GAP_UM - MIN_GAP_UM)`
-* Darker (or lighter, depending on `INVERT`) → **larger** squares. Empty pixels produce no geometry.
+* Each **active** pixel maps to a side length in `[side_min, side_max]`, where
+
+  * `side_min = max(0, MIN_SIDE_UM)`
+  * `side_max = min(CELL_UM, CELL_UM + GAP_UM - MIN_GAP_UM)`, then **snapped** to `GRID_STEP_UM`.
+
+* Darker (or lighter, depending on `INVERT`) → **larger** squares. Inactive pixels produce no geometry.
 
 > If `MIN_SIDE_UM > side_max`, the script aborts with a clear hint to increase pitch or relax constraints.
 
 ---
 
-## Sizing (inclusive of margins)
+## Sizing & placement (inclusive of margins)
 
-Let:
+Let `pitch = CELL_UM + GAP_UM`. The script computes `Nx, Ny` from the input aspect ratio and `FIT_MODE`, constrained by:
 
-* `pitch = CELL_UM + GAP_UM`
-* `margin = MARGIN_UM`
+* available **drawable** area (`TARGET_WIDTH_UM - 2*MARGIN_X_UM` by `TARGET_HEIGHT_UM - 2*MARGIN_Y_UM`),
+* and **MAX_CELLS** (automatic downscale with a `[WARN]`).
 
-Grid size (`Nx, Ny`) is chosen from the input image aspect ratio and `FIT_MODE`, constrained by:
-
-* available **drawable** area (`TARGET_WIDTH_UM / TARGET_HEIGHT_UM`, inclusive of margins),
-* and **MAX_CELLS** (automatic downscale when exceeded).
-
-Model extent (excluding margins) uses the **grid pitch** and a **conservative** square size:
+A conservative upper bound for content extent (excluding margins) uses the largest possible square:
 
 ```
-model_w ≈ (Nx - 1)*pitch + side_max
-model_h ≈ (Ny - 1)*pitch + side_max
+content_w ≈ (Nx - 1)*pitch + side_max
+content_h ≈ (Ny - 1)*pitch + side_max
 ```
 
-Final bounding box (including margins):
+Final bounding box (including margins) therefore fits within:
 
 ```
-width_um  = (Nx - 1)*pitch + side_max + 2*margin
-height_um = (Ny - 1)*pitch + side_max + 2*margin
+width_um  ≤ content_w  + 2*MARGIN_X_UM
+height_um ≤ content_h + 2*MARGIN_Y_UM
 ```
 
-> `side_max` is used for bounding since it is the largest possible square; actual content may be smaller (especially in grayscale).
+**Alignment:** If the content doesn’t fill the drawable box, it is placed according to `ALIGN` (`"center"` or `"topleft"`).
+All coordinates and side lengths are **snapped** to `GRID_STEP_UM`.
 
 ---
 
 ## Coordinate system
 
 * Image origin (top-left) maps to **bottom-left** in GDS: **Y is flipped**.
-* **GDS units**: unit = `1e-6 m` (µm), precision = `1e-9 m`.
+* **GDS units**: unit = `1 µm` (`1e-6 m`), precision = `1 nm` (`1e-9 m`).
 
 ---
 
 ## Notes & tips
 
-* **Backends**: uses **gdspy** if available; otherwise falls back to **gdstk** automatically.
-* **Resampling**: for pixel-sharp masks use `"nearest"`; for smoother downsampling try `"lanczos"` or `"bilinear"`.
-* **Safety**: `MAX_CELLS` prevents pathological geometries; the script will print a `[WARN]` if it must downscale.
-* **Layers**: geometry is emitted to `(LAYER_NUM, DATATYPE_NUM)` only.
-* **Verbose**: pass `-v`/`--verbose` to print grid size, safety constraints, and final bounding box.
+* **Backends:** uses **gdspy** if available; otherwise falls back to **gdstk** automatically.
+* **Resampling:** for pixel-sharp masks use `"nearest"`; for smoother downsampling try `"lanczos"` or `"bilinear"`.
+* **Safety:** `MAX_CELLS` prevents pathological geometries; the script prints a `[WARN]` when it downsamples.
+* **Layers:** geometry is emitted only to `(LAYER_NUM, DATATYPE_NUM)`.
+* **Verbose:** pass `-v` / `--verbose` to print grid size, constraints, placement, and final bounds.
 
 ---
 
@@ -155,3 +157,9 @@ python3 img2gds.py <input.png> <output.gds> [-v|--verbose]
 ```
 
 Errors are reported with actionable messages (e.g., missing file, non-PNG input, or conflicting size constraints).
+
+---
+
+## License
+
+This project is licensed under **GPL-3.0-or-later**. See `LICENSE` for details.

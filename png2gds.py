@@ -12,47 +12,55 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https:#www.gnu.org/licenses/>.
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import sys, os, math
 from typing import Tuple
 
-# ---------------- Configuration ----------------
-# GDS units
-GDS_UNIT_M       = 1e-6        # 1 µm = 1e-6 m
-GRID_STEP_UM     = 0.005
-GDS_PREC_M       = GRID_STEP_UM * 1e-6  # precision in meters, aligned to GRID_STEP_UM
+# ================================================================
+#                        USER-TUNABLE SETTINGS
+# ================================================================
+# Target outer bounding box (inclusive). No geometry is ever drawn outside.
+TARGET_WIDTH_UM   = 3000.0
+TARGET_HEIGHT_UM  = 2000.0
 
-# Grid parameters
-MAX_CELLS        = 500_000     # safety cap for Nx*Ny
-CELL_UM          = 10.0        # base side for binary [µm]
-GAP_UM           = 2.0         # base edge-to-edge gap [µm]
+# Inner margins that reserve space for pads, keep-out, etc.
+MARGIN_X_UM       = 150.0
+MARGIN_Y_UM       = 150.0
 
-# Sizing constraints (enforced in any mode)
-MIN_SIDE_UM      = 3.0         # minimum allowed square side [µm]
-MIN_GAP_UM       = 2.0         # minimum safety edge-to-edge gap [µm]
+# How to place the content inside the drawable box if it does not fully fill it.
+ALIGN             = "center"       # "center" | "topleft"
 
-# Sizing targets (inclusive of margins; optional)
-TARGET_WIDTH_UM  = 3000.0
-TARGET_HEIGHT_UM = 2000.0
-MARGIN_UM        = 150.0
+# Rendering
+MODE              = "grayscale"    # "binary" | "grayscale"
+INVERT            = True
+THRESHOLD         = 100
+RESAMPLE          = "nearest"      # "nearest" | "lanczos" | "bilinear"
+FIT_MODE          = "contain"      # "contain" | "fit_width" | "fit_height"
 
-# Rendering mode
-MODE             = "binary"    # "binary" | "grayscale"
+# Grid (logical pixel grid)
+CELL_UM           = 5.0            # base side for binary [µm]
+GAP_UM            = 2.0            # edge-to-edge gap [µm]
+MAX_CELLS         = 500_000        # cap for Nx*Ny
 
-# PNG processing
-INVERT           = True        # invert before threshold/intensity use
-THRESHOLD        = 250         # only used in "binary" (also as cutoff in grayscale)
+# Content layer/datatype (where the squares go)
+LAYER_NUM         = 74
+DATATYPE_NUM      = 0
 
-# Image processing
-RESAMPLE         = "nearest"   # "nearest" | "lanczos" | "bilinear"
-FIT_MODE         = "contain"   # "contain" | "fit_width" | "fit_height"
+# ================================================================
+#                        ADVANCED SETTINGS
+# ================================================================
+GDS_UNIT_M        = 1e-6           # 1 user unit = 1 µm
+GRID_STEP_UM      = 0.005          # snapping step [µm]
+GDS_PREC_M        = 1e-9
 
-# Numeric GDS layer/datatype
-LAYER_NUM        = 0
-DATATYPE_NUM     = 0
+# Constraints
+MIN_SIDE_UM       = 3.0            # min square side [µm]
+MIN_GAP_UM        = 2.0            # min edge-to-edge gap [µm]
 
-# ---------------- Backend selection ----------------
+# ================================================================
+#                        BACKEND SELECTION
+# ================================================================
 try:
     import gdspy as gds
     GDSPY = True
@@ -68,13 +76,14 @@ from PIL import Image
 
 LAYER_KW = {"layer": LAYER_NUM, "datatype": DATATYPE_NUM}
 
-# ---------------- Grid helpers ----------------
+# ================================================================
+#                           HELPERS
+# ================================================================
 def snap(x_um: float) -> float:
     """Snap a coordinate/length (in µm) to the technology grid."""
     step = GRID_STEP_UM
     return round(x_um / step) * step
 
-# ---------------- Image helpers ----------------
 def _load_png_grayscale(path: str) -> Image.Image:
     ext = os.path.splitext(path)[1].lower()
     if ext != ".png":
@@ -99,48 +108,37 @@ def _resample_mode(name: str):
     return m[n]
 
 def _compute_grid_dims_inclusive(
-    img_w, img_h,
-    target_w_um, target_h_um,
-    pitch_um, side_um, margin_um,
-    max_cells=500_000,
-    verbose=True
-) -> Tuple[int,int]:
-    r = (img_h / img_w) if img_w > 0 else 1.0  # aspect = H/W
+    img_w: int, img_h: int,
+    box_w_um: float, box_h_um: float,
+    pitch_um: float, side_um: float,
+    max_cells: int = 500_000,
+    verbose: bool = True
+) -> Tuple[int, int]:
+
+    r = (img_h / img_w) if img_w > 0 else 1.0
     s = float(side_um)
     p = float(pitch_um)
-    margin = float(margin_um)
 
-    def nx_max_from_width(draw_w):
-        return max(1, int(math.floor((draw_w - s) / p)) + 1)
+    def nx_max_from_width(draw_w):  return max(1, int(math.floor((draw_w - s) / p)) + 1)
+    def ny_max_from_height(draw_h): return max(1, int(math.floor((draw_h - s) / p)) + 1)
 
-    def ny_max_from_height(draw_h):
-        return max(1, int(math.floor((draw_h - s) / p)) + 1)
+    draw_w = max(box_w_um, s)
+    draw_h = max(box_h_um, s)
 
-    draw_w = None if target_w_um is None else max(target_w_um - 2.0 * margin, s)
-    draw_h = None if target_h_um is None else max(target_h_um - 2.0 * margin, s)
-
-    if draw_w is not None and draw_h is not None:
-        nx_w = nx_max_from_width(draw_w)
-        ny_h = ny_max_from_height(draw_h)
-
-        if FIT_MODE == "fit_width":
-            nx = nx_w
-            ny = min(ny_h, max(1, int(math.floor(r * nx))))
-        elif FIT_MODE == "fit_height":
-            ny = ny_h
-            nx = min(nx_w, max(1, int(math.floor(ny / r)))) if r > 0 else nx_w
-        else:  # "contain"
-            nx_h_cap = max(1, int(math.floor(ny_h / r))) if r > 0 else nx_w
-            nx = max(1, min(nx_w, nx_h_cap))
-            ny = max(1, min(ny_h, int(math.floor(r * nx))))
-    elif draw_w is not None:
+    if FIT_MODE == "fit_width":
         nx = nx_max_from_width(draw_w)
         ny = max(1, int(math.floor(r * nx)))
-    elif draw_h is not None:
+        ny = min(ny, ny_max_from_height(draw_h))
+    elif FIT_MODE == "fit_height":
         ny = ny_max_from_height(draw_h)
         nx = max(1, int(math.floor(ny / r))) if r > 0 else ny
-    else:
-        nx, ny = int(img_w), int(img_h)
+        nx = min(nx, nx_max_from_width(draw_w))
+    else:  # "contain"
+        nx_w = nx_max_from_width(draw_w)
+        ny_h = ny_max_from_height(draw_h)
+        nx_h_cap = max(1, int(math.floor(ny_h / r))) if r > 0 else nx_w
+        nx = max(1, min(nx_w, nx_h_cap))
+        ny = max(1, min(ny_h, int(math.floor(r * nx))))
 
     total = nx * ny
     if total > max_cells:
@@ -153,7 +151,6 @@ def _compute_grid_dims_inclusive(
 
     return nx, ny
 
-# ---------------- Size constraints helpers ----------------
 def _compute_size_bounds(pitch_um: float) -> Tuple[float, float]:
     side_min = max(0.0, float(MIN_SIDE_UM))
     side_max = max(0.0, min(float(CELL_UM), float(pitch_um) - float(MIN_GAP_UM)))
@@ -168,29 +165,70 @@ def _intensity_to_side(t01: float, side_min: float, side_max: float) -> float:
     t = 0.0 if t01 < 0.0 else (1.0 if t01 > 1.0 else float(t01))
     return side_min + (side_max - side_min) * t
 
-# ---------------- PNG → GDS ----------------
+# ================================================================
+#                         PNG → GDS PIPELINE
+# ================================================================
 def png_to_gds(input_path: str, output_path: str, verbose: bool = True):
-    cell_um = float(CELL_UM)
-    gap_um  = float(GAP_UM)
-    margin  = float(MARGIN_UM)
+
+    cell_um  = float(CELL_UM)
+    gap_um   = float(GAP_UM)
     pitch_um = cell_um + gap_um
 
     side_min, side_max = _compute_size_bounds(pitch_um)
+    side_max = snap(side_max)
+
+    if TARGET_WIDTH_UM <= 0 or TARGET_HEIGHT_UM <= 0:
+        raise ValueError("TARGET_* must be positive.")
+    if MARGIN_X_UM < 0 or MARGIN_Y_UM < 0:
+        raise ValueError("MARGIN_* must be non-negative.")
+    drawable_w = TARGET_WIDTH_UM  - 2.0 * MARGIN_X_UM
+    drawable_h = TARGET_HEIGHT_UM - 2.0 * MARGIN_Y_UM
+    if drawable_w <= 0 or drawable_h <= 0:
+        raise ValueError(
+            f"Drawable box is non-positive: ({drawable_w:.3f} µm × {drawable_h:.3f} µm). "
+            "Reduce margins or increase targets."
+        )
 
     img_gray = _load_png_grayscale(input_path)
     img_proc = _prepare_image(img_gray, MODE)
 
     nx, ny = _compute_grid_dims_inclusive(
         img_gray.width, img_gray.height,
-        TARGET_WIDTH_UM, TARGET_HEIGHT_UM,
-        pitch_um, cell_um, margin, max_cells=int(MAX_CELLS),
+        drawable_w, drawable_h,
+        pitch_um, cell_um, max_cells=int(MAX_CELLS),
         verbose=verbose
     )
+
+    width_nom  = (nx - 1) * pitch_um + side_max
+    height_nom = (ny - 1) * pitch_um + side_max
+
+    if width_nom > drawable_w + 1e-12 or height_nom > drawable_h + 1e-12:
+        raise ValueError(
+            "Drawable box too small for current pitch/side/grid:\n"
+            f"  need at least ~ {width_nom:.3f} µm × {height_nom:.3f} µm (no extra margins),\n"
+            f"  drawable = {drawable_w:.3f} µm × {drawable_h:.3f} µm.\n"
+            "Increase target size or reduce pitch/side or margins."
+        )
+
+    base_x = MARGIN_X_UM
+    base_y = MARGIN_Y_UM
+
+    slack_x = drawable_w - width_nom
+    slack_y = drawable_h - height_nom
+    if ALIGN.lower() == "center":
+        base_x += 0.5 * slack_x
+        base_y += 0.5 * slack_y
+    elif ALIGN.lower() == "topleft":
+        pass
+    else:
+        raise ValueError('ALIGN must be "center" or "topleft"')
+
+    base_x = snap(base_x)
+    base_y = snap(base_y)
 
     img_grid = img_proc.resize((nx, ny), resample=_resample_mode(RESAMPLE))
     pixels = img_grid.load()
 
-    # GDS lib/cell
     if GDSPY:
         lib = gds.GdsLibrary(unit=GDS_UNIT_M, precision=GDS_PREC_M)
         cell = lib.new_cell("LOGO")
@@ -201,21 +239,19 @@ def png_to_gds(input_path: str, output_path: str, verbose: bool = True):
     rects = []
     pitch = float(pitch_um)
 
-    # Flip Y: image (top→bottom) → GDS (bottom→top)
     for j_img in range(ny):
         j = ny - 1 - j_img
-        y0_row = margin + j * pitch
+        y0_row = base_y + j * pitch
         for i in range(nx):
-            x0_col = margin + i * pitch
+            x0_col = base_x + i * pitch
 
             if MODE == "binary":
                 on = (pixels[i, j_img] == 255)
                 if not on:
                     continue
-                side = cell_um 
-            else:  # grayscale
+                side = cell_um
+            else:
                 val = pixels[i, j_img]
-
                 if not INVERT:
                     if val <= THRESHOLD:
                         continue
@@ -247,28 +283,30 @@ def png_to_gds(input_path: str, output_path: str, verbose: bool = True):
             for r in rects:
                 cell.add(r)
 
-    width_um  = (nx - 1) * pitch + side_max + 2 * margin
-    height_um = (ny - 1) * pitch + side_max + 2 * margin
-
     if verbose:
+        content_bbox_w = width_nom
+        content_bbox_h = height_nom
         print(f"[INFO] Mode: {MODE}")
-        print(f"[INFO] Cells: {nx} x {ny}  -> squares {len(rects)}")
-        print(f"[INFO] Base Side={cell_um} µm, Base Gap={gap_um} µm, Pitch={pitch} µm")
-        print(f"[INFO] Safety: MIN_SIDE={side_min} µm, MIN_GAP={MIN_GAP_UM} µm, side_max={side_max} µm")
-        print(f"[INFO] Margin per side={margin} µm")
-        print(f"[INFO] GDS precision={GDS_PREC_M*1e9:.0f} nm, snap grid={GRID_STEP_UM} µm")
-        print(f"[INFO] Bounding box ~ {width_um:.3f} µm x {height_um:.3f} µm (inclusive of margins)")
-        if TARGET_WIDTH_UM is not None or TARGET_HEIGHT_UM is not None:
-            print(f"[INFO] Targets (inclusive): W={TARGET_WIDTH_UM} µm, H={TARGET_HEIGHT_UM} µm")
+        print(f"[INFO] Cells: {nx} x {ny}  -> rectangles {len(rects)}")
+        print(f"[INFO] Pitch={pitch} µm, Base Side={CELL_UM} µm, side_max={side_max} µm")
+        print(f"[INFO] Target box      : {TARGET_WIDTH_UM:.3f} µm × {TARGET_HEIGHT_UM:.3f} µm")
+        print(f"[INFO] Drawable box    : {drawable_w:.3f} µm × {drawable_h:.3f} µm "
+              f"(margins: x={MARGIN_X_UM} µm, y={MARGIN_Y_UM} µm)")
+        print(f"[INFO] Placement origin: ({base_x:.3f} µm, {base_y:.3f} µm), align={ALIGN}")
+        print(f"[INFO] Content bbox ≤  : {content_bbox_w:.3f} µm × {content_bbox_h:.3f} µm "
+              f"(inside drawable box)")
+        print(f"[INFO] Grid snap={GRID_STEP_UM} µm, GDS unit=1 µm, precision={GDS_PREC_M*1e9:.0f} nm")
 
     lib.write_gds(output_path)
     if verbose:
         print(f"[OK] Saved: {output_path}")
 
-# ---------------- Main ----------------
+# ================================================================
+#                             MAIN
+# ================================================================
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python3 img2gds.py <input.png> <output.gds>", file=sys.stderr)
+        print("Usage: python3 img2gds.py <input.png> <output.gds> [-v|--verbose]", file=sys.stderr)
         sys.exit(1)
 
     input_path  = sys.argv[1]
