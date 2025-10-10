@@ -32,19 +32,19 @@ MARGIN_Y_UM       = 150.0
 ALIGN             = "center"       # "center" | "topleft"
 
 # Rendering
-MODE              = "grayscale"    # "binary" | "grayscale"
-INVERT            = True
-THRESHOLD         = 100
+MODE              = "binary"       # "binary" | "grayscale"
+INVERT            = False
+THRESHOLD         = 0
 RESAMPLE          = "nearest"      # "nearest" | "lanczos" | "bilinear"
 FIT_MODE          = "contain"      # "contain" | "fit_width" | "fit_height"
 
 # Grid (logical pixel grid)
-CELL_UM           = 5.0            # base side for binary [µm]
-GAP_UM            = 2.0            # edge-to-edge gap [µm]
+CELL_UM           = 10.0           # base side for binary [µm]
+GAP_UM            = 5.0            # edge-to-edge gap [µm]
 MAX_CELLS         = 500_000        # cap for Nx*Ny
 
 # Content layer/datatype (where the squares go)
-LAYER_NUM         = 74
+LAYER_NUM         = 0
 DATATYPE_NUM      = 0
 
 # ================================================================
